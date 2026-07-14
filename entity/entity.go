@@ -63,4 +63,5 @@ type Config struct {
 	Cookies       string
 	UserAgent     string
 	Domain        string
+	Platform      string // "chaturbate" or "stripchat"
 }

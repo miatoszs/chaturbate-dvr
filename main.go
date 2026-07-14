@@ -30,14 +30,19 @@ const logo = `
 func main() {
 	app := &cli.App{
 		Name:    "chaturbate-dvr",
-		Version: "2.0.3",
-		Usage:   "Record your favorite Chaturbate streams automatically. 😎🫵",
+		Version: "2.1.0",
+		Usage:   "Record your favorite Chaturbate and Stripchat streams automatically. 😎🫵",
 		Flags: []cli.Flag{
 			&cli.StringFlag{
 				Name:    "username",
 				Aliases: []string{"u"},
 				Usage:   "The username of the channel to record",
 				Value:   "",
+			},
+			&cli.StringFlag{
+				Name:  "platform",
+				Usage: `Platform to record from: "chaturbate" or "stripchat"`,
+				Value: "chaturbate",
 			},
 			&cli.StringFlag{
 				Name:  "admin-username",
@@ -97,7 +102,7 @@ func main() {
 			},
 			&cli.StringFlag{
 				Name:  "domain",
-				Usage: "Chaturbate domain to use",
+				Usage: "Chaturbate domain to use (ignored for stripchat)",
 				Value: "https://chaturbate.com/",
 			},
 		},
@@ -121,7 +126,6 @@ func start(c *cli.Context) error {
 		return fmt.Errorf("new manager: %w", err)
 	}
 
-	// init web interface if username is not provided
 	if server.Config.Username == "" {
 		fmt.Printf("👋 Visit http://localhost:%s to use the Web UI\n\n\n", c.String("port"))
 
@@ -132,7 +136,6 @@ func start(c *cli.Context) error {
 		return router.SetupRouter().Run(":" + c.String("port"))
 	}
 
-	// else create a channel with the provided username
 	if err := server.Manager.CreateChannel(&entity.ChannelConfig{
 		IsPaused:    false,
 		Username:    c.String("username"),
@@ -145,6 +148,5 @@ func start(c *cli.Context) error {
 		return fmt.Errorf("create channel: %w", err)
 	}
 
-	// block forever
 	select {}
 }

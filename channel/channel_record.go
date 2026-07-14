@@ -10,16 +10,99 @@ import (
 	"github.com/teacat/chaturbate-dvr/chaturbate"
 	"github.com/teacat/chaturbate-dvr/internal"
 	"github.com/teacat/chaturbate-dvr/server"
+	"github.com/teacat/chaturbate-dvr/stripchat"
 )
+
+// streamClient is an interface satisfied by both chaturbate.Client and stripchat.Client.
+type streamClient interface {
+	GetStream(ctx context.Context, username string) (streamResult, error)
+}
+
+// streamResult is an interface satisfied by both *chaturbate.Stream and *stripchat.Stream.
+type streamResult interface {
+	GetPlaylist(ctx context.Context, resolution, framerate int) (watchable, error)
+}
+
+// watchable is an interface for any playlist that can watch segments.
+type watchable interface {
+	WatchSegments(ctx context.Context, handler func([]byte, float64) error) error
+	GetResolution() int
+	GetFramerate() int
+}
+
+// cbStreamAdapter wraps *chaturbate.Stream to satisfy streamResult.
+type cbStreamAdapter struct{ s *chaturbate.Stream }
+
+func (a *cbStreamAdapter) GetPlaylist(ctx context.Context, resolution, framerate int) (watchable, error) {
+	pl, err := a.s.GetPlaylist(ctx, resolution, framerate)
+	if err != nil {
+		return nil, err
+	}
+	return &cbPlaylistAdapter{pl}, nil
+}
+
+type cbPlaylistAdapter struct{ p *chaturbate.Playlist }
+
+func (a *cbPlaylistAdapter) WatchSegments(ctx context.Context, handler func([]byte, float64) error) error {
+	return a.p.WatchSegments(ctx, handler)
+}
+func (a *cbPlaylistAdapter) GetResolution() int { return a.p.Resolution }
+func (a *cbPlaylistAdapter) GetFramerate() int  { return a.p.Framerate }
+
+// cbClientAdapter wraps *chaturbate.Client to satisfy streamClient.
+type cbClientAdapter struct{ c *chaturbate.Client }
+
+func (a *cbClientAdapter) GetStream(ctx context.Context, username string) (streamResult, error) {
+	s, err := a.c.GetStream(ctx, username)
+	if err != nil {
+		return nil, err
+	}
+	return &cbStreamAdapter{s}, nil
+}
+
+// scStreamAdapter wraps *stripchat.Stream to satisfy streamResult.
+type scStreamAdapter struct{ s *stripchat.Stream }
+
+func (a *scStreamAdapter) GetPlaylist(ctx context.Context, resolution, framerate int) (watchable, error) {
+	pl, err := a.s.GetPlaylist(ctx, resolution, framerate)
+	if err != nil {
+		return nil, err
+	}
+	return &scPlaylistAdapter{pl}, nil
+}
+
+type scPlaylistAdapter struct{ p *stripchat.Playlist }
+
+func (a *scPlaylistAdapter) WatchSegments(ctx context.Context, handler func([]byte, float64) error) error {
+	return a.p.WatchSegments(ctx, handler)
+}
+func (a *scPlaylistAdapter) GetResolution() int { return a.p.Resolution }
+func (a *scPlaylistAdapter) GetFramerate() int  { return a.p.Framerate }
+
+// scClientAdapter wraps *stripchat.Client to satisfy streamClient.
+type scClientAdapter struct{ c *stripchat.Client }
+
+func (a *scClientAdapter) GetStream(ctx context.Context, username string) (streamResult, error) {
+	s, err := a.c.GetStream(ctx, username)
+	if err != nil {
+		return nil, err
+	}
+	return &scStreamAdapter{s}, nil
+}
+
+// newStreamClient returns the correct client based on platform config.
+func newStreamClient() streamClient {
+	if server.Config.Platform == "stripchat" {
+		return &scClientAdapter{c: stripchat.NewClient()}
+	}
+	return &cbClientAdapter{c: chaturbate.NewClient()}
+}
 
 // Monitor starts monitoring the channel for live streams and records them.
 func (ch *Channel) Monitor() {
-	client := chaturbate.NewClient()
+	client := newStreamClient()
 	ch.Info("starting to record `%s`", ch.Config.Username)
 
-	// Create a new context with a cancel function,
-	// the CancelFunc will be stored in the channel's CancelFunc field
-	// and will be called by `Pause` or `Stop` functions
 	ctx, _ := ch.WithCancel(context.Background())
 
 	var err error
@@ -56,26 +139,22 @@ func (ch *Channel) Monitor() {
 		}
 	}
 
-	// Always cleanup when monitor exits, regardless of error
 	if err := ch.Cleanup(); err != nil {
 		ch.Error("cleanup on monitor exit: %s", err.Error())
 	}
 
-	// Log error if it's not a context cancellation
 	if err != nil && !errors.Is(err, context.Canceled) {
 		ch.Error("record stream: %s", err.Error())
 	}
 }
 
 // Update sends an update signal to the channel's update channel.
-// This notifies the Server-sent Event to boradcast the channel information to the client.
 func (ch *Channel) Update() {
 	ch.UpdateCh <- true
 }
 
 // RecordStream records the stream of the channel using the provided client.
-// It retrieves the stream information and starts watching the segments.
-func (ch *Channel) RecordStream(ctx context.Context, client *chaturbate.Client) error {
+func (ch *Channel) RecordStream(ctx context.Context, client streamClient) error {
 	stream, err := client.GetStream(ctx, ch.Config.Username)
 	if err != nil {
 		return fmt.Errorf("get stream: %w", err)
@@ -87,7 +166,6 @@ func (ch *Channel) RecordStream(ctx context.Context, client *chaturbate.Client) 
 		return fmt.Errorf("next file: %w", err)
 	}
 
-	// Ensure file is cleaned up when this function exits in any case
 	defer func() {
 		if err := ch.Cleanup(); err != nil {
 			ch.Error("cleanup on record stream exit: %s", err.Error())
@@ -98,9 +176,10 @@ func (ch *Channel) RecordStream(ctx context.Context, client *chaturbate.Client) 
 	if err != nil {
 		return fmt.Errorf("get playlist: %w", err)
 	}
-	ch.UpdateOnlineStatus(true) // Update online status after `GetPlaylist` is OK
+	ch.UpdateOnlineStatus(true)
 
-	ch.Info("stream quality - resolution %dp (target: %dp), framerate %dfps (target: %dfps)", playlist.Resolution, ch.Config.Resolution, playlist.Framerate, ch.Config.Framerate)
+	ch.Info("stream quality - resolution %dp (target: %dp), framerate %dfps (target: %dfps)",
+		playlist.GetResolution(), ch.Config.Resolution, playlist.GetFramerate(), ch.Config.Framerate)
 
 	return playlist.WatchSegments(ctx, ch.HandleSegment)
 }
@@ -120,7 +199,6 @@ func (ch *Channel) HandleSegment(b []byte, duration float64) error {
 	ch.Duration += duration
 	ch.Info("duration: %s, filesize: %s", internal.FormatDuration(ch.Duration), internal.FormatFilesize(ch.Filesize))
 
-	// Send an SSE update to update the view
 	ch.Update()
 
 	if ch.ShouldSwitchFile() {
